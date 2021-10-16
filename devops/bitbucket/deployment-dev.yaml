@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nest-template-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nest-template-api
+  template:
+    metadata:
+      labels:
+        app: nest-template-api
+    spec:
+      containers:
+        - name: nest-template-api
+          image: {{image}}
+          ports:
+            - containerPort: 8000
+          livenessProbe: # Used by deployment controller
+            httpGet:
+              path: /api
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          readinessProbe: # Used by Ingress/GCLB
+            httpGet:
+              path: /api
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            limits:
+              memory: 1024Mi
+            requests:
+              memory: 512Mi
+          env:
+            - name: SAMPLE_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dev-environment-secret
+                  key: SAMPLE_POSTGRES_PASSWORD

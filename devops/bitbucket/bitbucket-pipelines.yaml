@@ -1,0 +1,147 @@
+image: node:14-alpine
+
+options:
+  docker: true
+  size: 2x
+
+definitions:
+  services:
+    docker:
+      memory: 4096
+  steps:
+    - step: &setup
+        name: Setup
+        caches:
+          - node
+        script:
+          - unset NPM_CONFIG_USER
+          - npm i
+          - npm audit --audit-level=critical
+
+    - step: &lint
+        name: Lint
+        caches:
+          - node
+        script:
+          - npm run lint
+
+    - step: &unit-test
+        name: Unit test
+        caches:
+          - node
+        script:
+          - npm run test:cov
+        artifacts:
+          - coverage/**
+
+    - step: &e2e
+        name: E2E test
+        caches:
+          - node
+        script:
+          - npm run test:e2e
+
+    - step: &build
+        name: Build
+        caches:
+          - node
+        script:
+          - npm run build
+        artifacts:
+          - dist/**
+
+    - step: &type-check
+        name: Type check
+        caches:
+          - node
+        script:
+          - npm run type-check
+
+    - step: &sonarqube-analysis
+        name: SonarQube Analysis
+        image: sonarsource/sonar-scanner-cli:latest
+        caches:
+          - node
+        script:
+          - sonar-scanner -Dsonar.projectBaseDir=$(pwd)
+            -Dproject.settings=sonar.properties
+            -Dsonar.projectKey=$BITBUCKET_REPO_SLUG
+            -Dsonar.projectName=$BITBUCKET_REPO_SLUG
+            -Dsonar.exclusions=**/node_modules/**/*,**/migrations/**/*,**/misc/**/*,**/webserver/**/*,**/*.spec.ts,**/cli/**/*
+            -Dsonar.coverage.exclusions=**/test/**/*
+            -Dsonar.sources=src
+            -Dsonar.language=ts
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.branch.name=$BITBUCKET_BRANCH
+            -Dsonar.login=$SONAR_LOGIN
+            -Dsonar.host.url=$SONAR_URL
+
+    - step: &sonarqube-pull-request-decoration
+        name: SonarQube pull request decoration
+        image: sonarsource/sonar-scanner-cli:latest
+        caches:
+          - node
+        script:
+          - sonar-scanner -Dsonar.projectBaseDir=$(pwd)
+            -Dproject.settings=sonar.properties
+            -Dsonar.projectKey=$BITBUCKET_REPO_SLUG
+            -Dsonar.projectName=$BITBUCKET_REPO_SLUG
+            -Dsonar.exclusions=**/node_modules/**/*,**/migrations/**/*,**/misc/**/*,**/webserver/**/*,**/*.spec.ts,**/cli/**/*
+            -Dsonar.coverage.exclusions=**/test/**/*
+            -Dsonar.sources=src
+            -Dsonar.language=ts
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.pullrequest.key=$BITBUCKET_PR_ID
+            -Dsonar.pullrequest.branch=$BITBUCKET_BRANCH
+            -Dsonar.pullrequest.base=$BITBUCKET_PR_DESTINATION_BRANCH
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.login=$SONAR_LOGIN
+            -Dsonar.host.url=$SONAR_URL
+
+    - step: &deploy
+        name: Deploy
+        image: google/cloud-sdk:latest
+        deployment: Development
+        script:
+          - export IMAGE_NAME=asia.gcr.io/$DOCKER_IMAGE_REPOSITORY/$ENV_TAG/$BITBUCKET_REPO_SLUG:$BITBUCKET_COMMIT
+          - docker build -t $IMAGE_NAME --build-arg ENV_TAG=$ENV_TAG .
+          - docker login -u $DOCKER_USERNAME -p "$DOCKER_PASSWORD" https://asia.gcr.io
+          - docker push $IMAGE_NAME
+          - sed -i "s|{{image}}|$IMAGE_NAME|g" $DEPLOYMENT_FILE
+          - echo $KUBE_TOKEN | base64 --decode > ./kube_token
+          - echo $KUBE_CA | base64 --decode > ./kube_ca
+          - kubectl config set-cluster $KUBE_CLUSTER --server=$KUBE_SERVER --certificate-authority="$(pwd)/kube_ca"
+          - kubectl config set-credentials bitbucket --token="$(cat ./kube_token)"
+          - kubectl config set-context development --cluster=$KUBE_CLUSTER --user=bitbucket
+          - kubectl config use-context development
+          - kubectl apply -f $DEPLOYMENT_FILE
+
+pipelines:
+  pull-requests:
+    '**':
+      - step: *setup
+      - parallel:
+          - step: *lint
+          - step: *unit-test
+          - step: *build
+          - step: *type-check
+      - step: *sonarqube-pull-request-decoration
+
+  branches:
+    develop:
+      - step: *setup
+      - parallel:
+          - step: *lint
+          - step: *unit-test
+          - step: *build
+          - step: *type-check
+      - step: *sonarqube-analysis
+      - step: *deploy
+  custom:
+    deploy:
+      - step: *deploy
+    deploy-test-env:
+      - step:
+          <<: *deploy
+          name: Deploy to Test ENV
+          deployment: Test
